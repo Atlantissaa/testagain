@@ -1,0 +1,252 @@
+function [x,flag,relres,iter,resvec] = pcg(A,b,tol,maxit,M1,M2,x0,varargin)
+
+if (nargin < 2)
+    error(message('MATLAB:pcg:NotEnoughInputs'));
+end
+
+[atype,afun,afcnstr] = iterchk(A);
+
+if strcmp(atype,'matrix')
+    [m,n] = size(A);
+    if (m ~= n)
+        error(message('MATLAB:pcg:NonSquareMatrix'));
+    end
+    if ~isequal(size(b),[m,1])
+        error(message('MATLAB:pcg:RSHsizeMatchCoeffMatrix', m));
+    end
+else
+    m = size(b,1);
+    n = m;
+    if ~iscolumn(b)
+        error(message('MATLAB:pcg:RSHnotColumn'));
+    end
+end
+
+% Assign default values to unspecified parameters
+if (nargin < 3) || isempty(tol)
+    tol = 1e-6;
+end
+warned = 0;
+if tol <= eps
+    warning(message('MATLAB:pcg:tooSmallTolerance'));
+    warned = 1;
+    tol = eps;
+elseif tol >= 1
+    warning(message('MATLAB:pcg:tooBigTolerance'));
+    warned = 1;
+    tol = 1-eps;
+end
+if (nargin < 4) || isempty(maxit)
+    maxit = min(n,20);
+end
+
+% Check for all zero right hand side vector => all zero solution
+n2b = norm(b);                     % Norm of rhs vector, b
+if (n2b == 0)                      % if    rhs vector is all zeros
+    x = zeros(n,1);                % then  solution is all zeros
+    flag = 0;                      % a valid solution has been obtained
+    relres = 0;                    % the relative residual is actually 0/0
+    iter = 0;                      % no iterations need be performed
+    resvec = 0;                    % resvec(1) = norm(b-A*x) = norm(0)
+    if (nargout < 2)
+        itermsg('pcg',tol,maxit,0,flag,iter,NaN);
+    end
+    return
+end
+
+if ((nargin >= 5) && ~isempty(M1))
+    existM1 = 1;
+    [m1type,m1fun,m1fcnstr] = iterchk(M1);
+    if strcmp(m1type,'matrix')
+        if ~isequal(size(M1),[m,m])
+            error(message('MATLAB:pcg:WrongPrecondSize', m));
+        end
+    end
+else
+    existM1 = 0;
+    m1type = 'matrix';
+end
+
+if ((nargin >= 6) && ~isempty(M2))
+    existM2 = 1;
+    [m2type,m2fun,m2fcnstr] = iterchk(M2);
+    if strcmp(m2type,'matrix')
+        if ~isequal(size(M2),[m,m])
+            error(message('MATLAB:pcg:WrongPrecondSize', m));
+        end
+    end
+else
+    existM2 = 0;
+    m2type = 'matrix';
+end
+
+if ((nargin >= 7) && ~isempty(x0))
+    if ~isequal(size(x0),[n,1])
+        error(message('MATLAB:pcg:WrongInitGuessSize', n));
+    else
+        x = x0;
+    end
+else
+    x = zeros(n,1);
+end
+
+if ((nargin > 7) && strcmp(atype,'matrix') && ...
+        strcmp(m1type,'matrix') && strcmp(m2type,'matrix'))
+    error(message('MATLAB:pcg:TooManyInputs'));
+end
+
+
+flag = 1;
+xmin = x;                          % Iterate which has minimal residual so far
+imin = 0;                          % Iteration at which xmin was computed
+tolb = tol * n2b;                  % Relative tolerance
+r = b - iterapp('mtimes',afun,atype,afcnstr,x,varargin{:});
+normr = norm(r);                   % Norm of residual
+normr_act = normr;
+
+if (normr <= tolb)                 % Initial guess is a good enough solution
+    flag = 0;
+    relres = normr / n2b;
+    iter = 0;
+    resvec = normr;
+    if (nargout < 2)
+        itermsg('pcg',tol,maxit,0,flag,iter,relres);
+    end
+    return
+end
+
+resvec = zeros(maxit+1,1);         % Preallocate vector for norm of residuals
+resvec(1,:) = normr;               % resvec(1) = norm(b-A*x0)
+normrmin = normr;                  % Norm of minimum residual
+rho = 1;
+stag = 0;                          % stagnation of the method
+moresteps = 0;
+maxmsteps = min([floor(n/50),5,n-maxit]);
+maxstagsteps = 3;
+
+% loop over maxit iterations (unless convergence or failure)
+
+for ii = 1 : maxit
+    if existM1
+        y = iterapp('mldivide',m1fun,m1type,m1fcnstr,r,varargin{:});
+        if ~all(isfinite(y))
+            flag = 2;
+            break
+        end
+    else % no preconditioner
+        y = r;
+    end
+    
+    if existM2
+        z = iterapp('mldivide',m2fun,m2type,m2fcnstr,y,varargin{:});
+        if ~all(isfinite(z))
+            flag = 2;
+            break
+        end
+    else % no preconditioner
+        z = y;
+    end
+    
+    rho1 = rho;
+    rho = r' * z;
+    if ((rho == 0) || isinf(rho))
+        flag = 4;
+        break
+    end
+    if (ii == 1)
+        p = z;
+    else
+        beta = rho / rho1;
+        if ((beta == 0) || isinf(beta))
+            flag = 4;
+            break
+        end
+        p = z + beta * p;
+    end
+    q = iterapp('mtimes',afun,atype,afcnstr,p,varargin{:});
+    pq = p' * q;
+    if ((pq <= 0) || isinf(pq))
+        flag = 4;
+        break
+    else
+        alpha = rho / pq;
+    end
+    if isinf(alpha)
+        flag = 4;
+        break
+    end
+    
+    % Check for stagnation of the method    
+    if (norm(p)*abs(alpha) < eps*norm(x))
+        stag = stag + 1;
+    else
+        stag = 0;
+    end
+    
+    x = x + alpha * p;             % form new iterate
+    r = r - alpha * q;
+    normr = norm(r);
+    normr_act = normr;
+    resvec(ii+1,1) = normr;
+    
+    % check for convergence
+    if (normr <= tolb || stag >= maxstagsteps || moresteps)
+        r = b - iterapp('mtimes',afun,atype,afcnstr,x,varargin{:});
+        normr_act = norm(r);
+        resvec(ii+1,1) = normr_act;
+        if (normr_act <= tolb)
+            flag = 0;
+            iter = ii;
+            break
+        else
+            if stag >= maxstagsteps && moresteps == 0
+                stag = 0;
+            end
+            moresteps = moresteps + 1;
+            if moresteps >= maxmsteps
+                if ~warned
+                    warning(message('MATLAB:pcg:tooSmallTolerance'));
+                end
+                flag = 3;
+                iter = ii;
+                break;
+            end
+        end
+    end
+    if (normr_act < normrmin)      % update minimal norm quantities
+        normrmin = normr_act;
+        xmin = x;
+        imin = ii;
+    end
+    if stag >= maxstagsteps
+        flag = 3;
+        break;
+    end
+end                                % for ii = 1 : maxit
+
+% returned solution is first with minimal residual
+if (flag == 0)
+    relres = normr_act / n2b;
+else
+    r_comp = b - iterapp('mtimes',afun,atype,afcnstr,xmin,varargin{:});
+    if norm(r_comp) <= normr_act
+        x = xmin;
+        iter = imin;
+        relres = norm(r_comp) / n2b;
+    else
+        iter = ii;
+        relres = normr_act / n2b;
+    end
+end
+
+% truncate the zeros from resvec
+if ((flag <= 1) || (flag == 3))
+    resvec = resvec(1:ii+1,:);
+else
+    resvec = resvec(1:ii,:);
+end
+
+% only display a message if the output flag is not used
+if (nargout < 2)
+    itermsg('pcg',tol,maxit,ii,flag,iter,relres);
+end
